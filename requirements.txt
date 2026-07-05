@@ -1,8 +1,8 @@
-streamlit==1.37.0
-streamlit-drawable-canvas==0.9.3
-opencv-python-headless==4.9.0.80
-pandas==2.2.1
-shapely==2.0.3
-scipy==1.12.0
-mplsoccer==1.2.4
-watchdog==4.0.0
+streamlit==1.58.0
+streamlit-drawable-canvas-fix==0.9.8
+opencv-python-headless==4.12.0.88
+pandas==2.3.3
+shapely==2.1.2
+scipy==1.16.3
+mplsoccer==1.6.1
+watchdog==6.0.0
