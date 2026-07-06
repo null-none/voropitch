@@ -7,7 +7,6 @@ Voropitch is a Streamlit app for football match annotation: calibrate camera per
 
 - Python 3.10 or newer (3.12 recommended)
 - Dependencies listed in `requirements.txt`
-- 
 
 ## Run
 
