@@ -1,46 +1,28 @@
+import base64
+import tempfile
+
 import cv2
 import numpy as np
-from shapely.geometry import Polygon, Point
-from shapely.affinity import scale
 from itertools import product
-from PIL import Image, ImageFont, ImageDraw, ImageChops, ImageColor
-import streamlit as st
-import tempfile
-import base64
+from PIL import Image
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
 
 
 class Homography:
     def __init__(self, pts_src, pts_dst):
         self.pts_src = np.array(pts_src)
         self.pts_dst = np.array(pts_dst)
-        self.h, out = cv2.findHomography(self.pts_src, self.pts_dst)
+        self.h, _ = cv2.findHomography(self.pts_src, self.pts_dst)
         self.im_size = (525, 340)
         self.im_width = self.im_size[0]
         self.im_heigth = self.im_size[1]
         self.coord_converter = np.array(self.im_size) / 100 / np.array([1.2, 0.8])
 
     def apply_to_image(self, image):
-        """Applies homography to provided image.
-
-        Args:
-            image (PitchImage): A PitchImage instance
-
-        Returns:
-            ndarray: numpy array representing an image of size self.im_size
-        """
-        im_out = cv2.warpPerspective(np.array(image.im), self.h, self.im_size)
-        return im_out
+        return cv2.warpPerspective(np.array(image.im), self.h, self.im_size)
 
     def apply_to_points(self, points, inverse=False):
-        """Applies homography to provided points
-
-        Args:
-            points (ndarray): An array of size (n,2).
-            inverse (bool, optional): If True, inverts the homography matrix. Defaults to False.
-
-        Returns:
-            ndarray: An array of size (n,2)
-        """
         h = np.linalg.inv(self.h) if inverse else self.h
         _points = np.hstack([points, np.ones((len(points), 1))])
         _converted_points = np.dot(h, _points.T)
@@ -56,38 +38,55 @@ class VoronoiPitch:
         return [
             index
             for index, region in enumerate(self.vor.regions)
-            if (not -1 in region) and (len(region) > 0)
+            if (-1 not in region) and (len(region) > 0)
         ]
 
     def get_points_region(self, region):
         return np.vstack([self.vor.vertices[i] for i in self.vor.regions[region]])
 
     def get_color_region(self, region):
-        return self.df[self.df["region"] == region]["team"].values[0]
+        teams = self.df.loc[self.df["region"] == region, "team"].dropna()
+        if teams.empty:
+            return "#808080"
+        return teams.values[0]
 
-    def get_voronoi_polygons(self, image, original=True):
-        return [
-            {
-                "polygon": get_polygon(
-                    self.get_points_region(region) * image.h.coord_converter,
-                    image,
-                    original,
-                ),
-                "color": self.get_color_region(region),
-            }
-            for region in self.get_regions()
-        ]
+    def draw_on_mpl_axes(self, ax, opacity=89):
+        from matplotlib.patches import Polygon as MplPolygon
+
+        pitch_bounds = Polygon([(0, 0), (120, 0), (120, 80), (0, 80)])
+        player_regions = set(self.df["region"].tolist())
+        alpha = opacity / 255.0
+
+        for region in self.get_regions():
+            if region not in player_regions:
+                continue
+            cell = Polygon(self.get_points_region(region).tolist())
+            clipped = pitch_bounds.intersection(cell)
+            coords = _exterior_coords(clipped)
+            if coords is None:
+                continue
+            ax.add_patch(
+                MplPolygon(
+                    coords,
+                    closed=True,
+                    facecolor=self.get_color_region(region),
+                    edgecolor="none",
+                    alpha=alpha,
+                    zorder=1,
+                )
+            )
 
 
 class Play:
     def __init__(self, uploaded_video):
-        with tempfile.NamedTemporaryFile() as fp:
-            fp.write(uploaded_video.getvalue())
-            self.video = cv2.VideoCapture(fp.name)
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        self._tmp.write(uploaded_video.getvalue())
+        self._tmp.flush()
+        self.video = cv2.VideoCapture(self._tmp.name)
 
     def get_frame(self, t):
         self.video.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
-        success, img = self.video.read()
+        _, img = self.video.read()
         return img
 
 
@@ -101,8 +100,7 @@ class PitchImage:
         self.pitch = pitch
 
     def resize(self, im, width):
-        im = im.resize((width, int(width * im.height / im.width)))
-        return im
+        return im.resize((width, int(width * im.height / im.width)))
 
     def set_info(self, df, lines):
         df["line"] = lines
@@ -120,9 +118,8 @@ class PitchImage:
         self.conv_im = Image.fromarray(self.h.apply_to_image(self))
 
     def get_intersections(self):
-        lines = self.lines
-        vertical_lines = [x for x in lines if x in self.pitch.vert_lines]
-        horizontal_lines = [x for x in lines if x in self.pitch.horiz_lines]
+        vertical_lines = [x for x in self.lines if x in self.pitch.vert_lines]
+        horizontal_lines = [x for x in self.lines if x in self.pitch.horiz_lines]
         intersections = {
             "_".join([v, h]): line_intersect(
                 self.df.loc[v, ["slope", "intercept"]],
@@ -130,83 +127,9 @@ class PitchImage:
             )
             for v, h in product(vertical_lines, horizontal_lines)
         }
-
         pts_src = list(intersections.values())
         pts_dst = [self.pitch.get_intersections()[x] for x in intersections]
-
         return pts_src, pts_dst
-
-    def get_image(self, original=True):
-        return self.im if original else self.conv_im
-
-    def get_pitch_coords(self):
-        return (
-            (0, 0),
-            (0, self.h.im_heigth),
-            (self.h.im_width, self.h.im_heigth),
-            (self.h.im_width, 0),
-        )
-
-    def get_camera_coords(self):
-        return self.h.apply_to_points(
-            (
-                (0, 0),
-                (0, self.im.height),
-                (self.im.width, self.im.height),
-                (self.im.width, 0),
-            )
-        )
-
-
-class PitchDraw:
-    def __init__(self, pitch_image, original=True):
-        self.base_im = pitch_image.get_image(original).copy()
-        self.draw_im = Image.new("RGBA", self.base_im.size, (0, 0, 0, 0))
-        self.draw = ImageDraw.Draw(self.draw_im, mode="RGBA")
-        self.original = original
-        self.h = pitch_image.h
-
-    def draw_polygon(self, polygon, color, outline="gray"):
-        self.draw.polygon(
-            list(tuple(point) for point in polygon.tolist()),
-            fill=color,
-            outline=outline,
-        )
-
-    def draw_voronoi(self, voronoi, image, opacity):
-        for pol in voronoi.get_voronoi_polygons(image, self.original):
-            if pol["polygon"] is not None:
-                fill_color = get_rgba(pol["color"], opacity)
-                self.draw_polygon(pol["polygon"], fill_color)
-
-    def draw_circle(self, xy, color, size=1, opacity=255, outline=None):
-        center = Point(*xy)
-        scaler = self.h.coord_converter / self.h.coord_converter.sum()
-        circle = scale(center.buffer(size), *reversed(scaler))
-        if self.original:
-            points = self.h.apply_to_points(
-                np.vstack(circle.exterior.xy).T * self.h.coord_converter, inverse=True
-            )
-        else:
-            points = np.vstack(circle.exterior.xy).T * self.h.coord_converter
-        fill_color = get_rgba(color, opacity)
-        if outline is None:
-            outline = color
-        self.draw_polygon(points, fill_color, outline)
-
-    def draw_text(self, xy, string, color):
-        xy = xy * self.h.coord_converter
-        font = ImageFont.load_default()
-        if self.original:
-            xy = self.h.apply_to_points([xy], inverse=True)[0]
-        self.draw.text(tuple(xy), string, font=font, fill=color)
-
-    def compose_image(self, sensitivity=25):
-        pitch_mask = get_edge_img(self.base_im, sensitivity=sensitivity)
-        self.draw_im.putalpha(
-            Image.fromarray(np.minimum(pitch_mask, np.array(self.draw_im.split()[-1])))
-        )
-        return Image.alpha_composite(self.base_im.convert("RGBA"), self.draw_im)
 
 
 def line_intersect(si1, si2):
@@ -229,6 +152,7 @@ def get_si_from_coords(lines):
 def calculate_voronoi(df):
     from scipy.spatial import Voronoi
 
+    df = df.copy()
     values = np.vstack(
         (
             df[["x", "y"]].values,
@@ -243,47 +167,36 @@ def calculate_voronoi(df):
     return vor, df
 
 
-def get_polygon(points, image, convert):
-    base_polygon = Polygon(points.tolist())
-    pitch_polygon = Polygon(image.get_pitch_coords())
-    camera_polygon = Polygon(image.get_camera_coords()).convex_hull
-    polygon = camera_polygon.intersection(pitch_polygon).intersection(base_polygon)
-    if polygon.area > 0:
-        if convert:
-            polygon = image.h.apply_to_points(
-                np.vstack(polygon.exterior.xy).T, inverse=True
-            )
-        else:
-            polygon = np.vstack(polygon.exterior.xy).T
-        return polygon
+def _exterior_coords(geometry):
+    if geometry.is_empty:
+        return None
+    if geometry.geom_type == "Polygon":
+        polygon = geometry
+    elif geometry.geom_type == "MultiPolygon":
+        polygon = max(geometry.geoms, key=lambda part: part.area)
+    elif geometry.geom_type == "GeometryCollection":
+        parts = [
+            g for g in geometry.geoms if g.geom_type in ("Polygon", "MultiPolygon")
+        ]
+        if not parts:
+            return None
+        return _exterior_coords(unary_union(parts))
     else:
         return None
+    return np.vstack(polygon.exterior.xy).T
 
 
-def get_edge_img(img, sensitivity=25):
-    hsv_img = cv2.cvtColor(np.array(img), cv2.COLOR_BGR2HSV)
-    hues = hsv_img[:, :, 0]
-    median_hue = np.median(hues[hues > 1])
-    min_filter = np.array([median_hue - sensitivity, 20, 0])
-    max_filter = np.array([median_hue + sensitivity, 255, 255])
-
-    mask = cv2.inRange(hsv_img, min_filter, max_filter)
-    return mask
-
-
-def get_rgba(color, alpha=255):
-    color = ImageColor.getrgb(color)
-    return color + (alpha,)
+def stroke_to_hex(stroke, colors):
+    if stroke is None or (isinstance(stroke, float) and np.isnan(stroke)):
+        return None
+    stroke = str(stroke).strip().lower()
+    for name, code in colors.items():
+        if stroke == code.lower() or stroke == name.lower():
+            return code
+    return None
 
 
 def get_table_download_link(df):
-    """Generates a link allowing the data in a given panda dataframe to be downloaded
-    in:  dataframe
-    out: href string
-    """
     csv = df.to_csv(index=True)
-    b64 = base64.b64encode(
-        csv.encode()
-    ).decode()  # some strings <-> bytes conversions necessary here
-    href = f'<a href="data:file/csv;base64,{b64}" download="data.csv">Download csv file</a>'
-    return href
+    b64 = base64.b64encode(csv.encode()).decode()
+    return f'<a href="data:file/csv;base64,{b64}" download="data.csv">Download csv file</a>'

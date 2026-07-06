@@ -1,4 +1,3 @@
-import numpy as np
 from itertools import product
 from dataclasses import dataclass, field
 
@@ -18,9 +17,6 @@ class Pitch:
             for vl, hl in intersection_points
         }
         return intersections
-
-    def get_lines(self):
-        return list(sorted(set(self.vert_lines).union(set(self.horiz_lines))))
 
     def scaler(self, convert):
         return self.SCALE if convert else 1
@@ -51,7 +47,6 @@ class FootballPitch(Pitch):
         }
 
         self.horiz_lines = {
-            "DG": self.BOX_HEIGHT,
             "UP": (self.Y_SIZE - self.BOX_HEIGHT) / 2,
             "UG": (self.Y_SIZE - self.GOAL_AREA_HEIGHT) / 2,
             "DG": (self.Y_SIZE + self.GOAL_AREA_HEIGHT) / 2,
@@ -60,21 +55,3 @@ class FootballPitch(Pitch):
             "D": self.Y_SIZE,
             "C": self.Y_SIZE / 2,
         }
-
-    def get_penalty_area(self, convert=True):
-        SPACE = (self.Y_SIZE - self.BOX_HEIGHT) / 2
-        PENALTY_AREA = [
-            [self.BOX_WIDTH, SPACE],
-            [self.BOX_WIDTH, self.BOX_HEIGHT + SPACE],
-            [0, SPACE],
-            [0, self.BOX_HEIGHT + SPACE],
-        ]
-        scaler = self.SCALE if convert else 1
-        return np.array(PENALTY_AREA) * scaler
-
-
-@dataclass
-class BasketballPitch(Pitch):
-    SCALE: int = 18
-    X_SIZE: float = 28.7
-    Y_SIZE: float = 15.2
